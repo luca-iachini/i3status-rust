@@ -152,6 +152,8 @@ define_blocks!(
     backlight,
     battery,
     bluetooth,
+    #[cfg(feature = "calendar")]
+    calendar,
     cpu,
     custom,
     custom_dbus,
@@ -201,8 +203,6 @@ define_blocks!(
     watson,
     weather,
     xrandr,
-    #[cfg(feature = "calendar")]
-    calendar,
 );
 
 /// An error which originates from a block
