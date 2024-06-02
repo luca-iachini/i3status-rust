@@ -11,12 +11,20 @@
 //! `no_events_format` | A string to customize the output of this block when there are no events | <code>\" $icon \"</code>
 //! `redirect_format` | A string to customize the output of this block when the authorization is asked | <code>\" $icon Check your web browser \"</code>
 //! `interval` | Update interval in seconds | `60`
+//! `events_within_hours` | Number of hours to look for events in the future | `48`
+//! `source` | Array of sources to pull calendars from | `[]`
+//! `warning_threshold` | Warning threshold in seconds for the upcoming event | `300`
+//! `browser_cmd` | Command to open event details in a browser. The block passes the HTML link as an argument | `"xdg-open"`
+//!
+//! # Source Configuration
+//!
+//! Key | Values | Default
+//! ----|--------|--------
 //! `url` | CalDav calendar server URL | N/A
 //! `auth` | Authentication configuration (unauthenticated, basic, or oauth2) | `unauthenticated`
 //! `calendars` | List of calendar names to monitor. If empty, all calendars will be fetched. | `[]`
-//! `events_within_hours` | Number of hours to look for events in the future | `48`
-//! `warning_threshold` | Warning threshold in seconds for the upcoming event | `300`
-//! `browser_cmd` | Command to open event details in a browser. The block passes the HTML link as an argument | `"xdg-open"`
+//!
+//! Note: Currently only one source is supported
 //!
 //! Action          | Description                               | Default button
 //! ----------------|-------------------------------------------|---------------
@@ -33,12 +41,13 @@
 //! ongoing_event_format = " $icon $summary (ends at $end.datetime(f:'%H:%M')) "
 //! no_events_format = " $icon no events "
 //! interval = 30
-//! url = "https://caldav.example.com/calendar/"
-//! calendars = ["user/calendar"]
 //! events_within_hours = 48
 //! warning_threshold = 600
 //! browser_cmd = "firefox"
-//! [block.auth]
+//! [[block.source]]
+//! url = "https://caldav.example.com/calendar/"
+//! calendars = ["user/calendar"]
+//! [block.source.auth]
 //! type = "unauthenticated"
 //! ```
 //!
@@ -51,12 +60,13 @@
 //! ongoing_event_format = " $icon $summary (ends at $end.datetime(f:'%H:%M')) "
 //! no_events_format = " $icon no events "
 //! interval = 30
-//! url = "https://caldav.example.com/calendar/"
-//! calendars = [ "Holidays" ]
 //! events_within_hours = 48
 //! warning_threshold = 600
 //! browser_cmd = "firefox"
-//! [block.auth]
+//! [[block.source]]
+//! url = "https://caldav.example.com/calendar/"
+//! calendars = [ "Holidays" ]
+//! [block.source.auth]
 //! type = "basic"
 //! username = "your_username"
 //! password = "your_password"
@@ -86,12 +96,13 @@
 //! ongoing_event_format = " $icon $summary (ends at $end.datetime(f:'%H:%M')) "
 //! no_events_format = " $icon no events "
 //! interval = 30
-//! url = "https://apidata.googleusercontent.com/caldav/v2/"
-//! calendars = ["primary"]
 //! events_within_hours = 48
 //! warning_threshold = 600
 //! browser_cmd = "firefox"
-//! [block.auth]
+//! [[block.source]]
+//! url = "https://apidata.googleusercontent.com/caldav/v2/"
+//! calendars = ["primary"]
+//! [block.source.auth]
 //! type = "oauth2"
 //! client_id = "your_client_id"
 //! client_secret = "your_client_secret"
@@ -167,6 +178,14 @@ pub enum AuthConfig {
 
 #[derive(Deserialize, Debug, SmartDefault)]
 #[serde(deny_unknown_fields, default)]
+pub struct Source {
+    pub url: String,
+    pub auth: AuthConfig,
+    pub calendars: Vec<String>,
+}
+
+#[derive(Deserialize, Debug, SmartDefault)]
+#[serde(deny_unknown_fields, default)]
 pub struct Config {
     pub next_event_format: FormatConfig,
     pub ongoing_event_format: FormatConfig,
@@ -174,11 +193,9 @@ pub struct Config {
     pub redirect_format: FormatConfig,
     #[default(60.into())]
     pub interval: Seconds,
-    pub url: String,
-    pub auth: AuthConfig,
-    pub calendars: Vec<String>,
     #[default(48)]
     pub events_within_hours: u32,
+    pub source: Vec<Source>,
     #[default(300)]
     pub warning_threshold: u32,
     #[default("xdg-open".into())]
@@ -199,7 +216,20 @@ pub async fn run(config: &Config, api: &CommonApi) -> Result<()> {
 
     api.set_default_actions(&[(MouseButton::Left, None, "open_link")])?;
 
-    let mut client = caldav_client(config).await?;
+    let source = match config.source.len() {
+        0 => return Err(Error::new("A calendar source must be supplied")),
+        1 => config
+            .source
+            .first()
+            .expect("There must be a first entry since the length is 1"),
+        _ => {
+            return Err(Error::new(
+                "Currently only one calendar source is supported",
+            ))
+        }
+    };
+
+    let mut client = caldav_client(source).await?;
 
     let mut timer = config.interval.timer();
 
@@ -216,7 +246,7 @@ pub async fn run(config: &Config, api: &CommonApi) -> Result<()> {
 
         let mut next_event = None;
         for retries in 0..=1 {
-            let next_event_result = get_next_event(config, &mut client, events_within).await;
+            let next_event_result = get_next_event(source, &mut client, events_within).await;
             match next_event_result {
                 Ok(event) => {
                     next_event = event;
@@ -297,8 +327,8 @@ pub async fn run(config: &Config, api: &CommonApi) -> Result<()> {
     }
 }
 
-async fn caldav_client(config: &Config) -> Result<caldav::CalDavClient> {
-    let auth = match &config.auth {
+async fn caldav_client(source: &Source) -> Result<caldav::CalDavClient> {
+    let auth = match &source.auth {
         AuthConfig::Unauthenticated => auth::Auth::Unauthenticated,
         AuthConfig::Basic(BasicAuthConfig { username, password }) => {
             let username = username
@@ -338,13 +368,13 @@ async fn caldav_client(config: &Config) -> Result<caldav::CalDavClient> {
         }
     };
     Ok(CalDavClient::new(
-        Url::parse(&config.url).error("Invalid CalDav server url")?,
+        Url::parse(&source.url).error("Invalid CalDav server url")?,
         auth,
     ))
 }
 
 async fn get_next_event(
-    config: &Config,
+    source: &Source,
     client: &mut CalDavClient,
     within: Duration,
 ) -> Result<Option<caldav::Event>, CalendarError> {
@@ -352,7 +382,7 @@ async fn get_next_event(
         .calendars()
         .await?
         .into_iter()
-        .filter(|c| config.calendars.is_empty() || config.calendars.contains(&c.name))
+        .filter(|c| source.calendars.is_empty() || source.calendars.contains(&c.name))
         .collect();
     let mut events: Vec<Event> = vec![];
     for calendar in calendars {
